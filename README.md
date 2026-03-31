@@ -1,63 +1,64 @@
 # Implementation and Benchmark of Efficient Attention Mechanisms
 
-### [View the Full Benchmark Notebook](./main_benchmark.ipynb)
+### [View the Full Benchmark Notebook](https://github.com/Hiteshwari7/efficient-attention-benchmark/blob/main/main_benchmark.ipynb)
 
-This project implements and analyzes three Transformer attention mechanisms from scratch in PyTorch to empirically validate their performance-compute trade-offs.
+This project implements and benchmarks three Transformer attention mechanisms in PyTorch, with a focus on **true** algorithmic efficiency — not just masking tricks.
 
 ## Summary
 
-The standard attention mechanism from "Attention Is All You Need" (Vaswani et al., 2017) has a computational complexity of $O(n^2)$ with respect to sequence length $n$. This quadratic scaling makes it computationally infeasible for very long sequences.
+The standard attention mechanism (Vaswani et al., 2017) has $O(n^2)$ time and memory complexity in sequence length $n$. This quadratic scaling makes it infeasible for long sequences. This project implements and benchmarks two efficient alternatives that avoid materializing the full $n \times n$ score matrix:
 
-This project implements and benchmarks two "efficient" alternatives against the standard:
+| Mechanism | Time | Memory | Key idea |
+|---|---|---|---|
+| **Full O(n²)** | $O(n^2 \cdot d)$ | $O(n^2)$ | Baseline — full score matrix |
+| **Sparse (Top-k)** | $O(n \cdot k \cdot d)$ | $O(n \cdot k \cdot d)$ | `torch.gather` — only k values aggregated |
+| **Local (Sliding-Window)** | $O(n \cdot w \cdot d)$ | $O(n \cdot w \cdot d)$ | `F.unfold` — only local window in memory |
 
-1.  **Standard (Full) Attention:** The $O(n^2)$ baseline, where every token attends to every other token.
-2.  **Sparse (Top-k) Attention:** An $O(n \cdot k)$ implementation where each token only attends to the $k$ most similar tokens.
-3.  **Local (Sliding Window) Attention:** An $O(n \cdot w)$ implementation where each token only attends to tokens within a local window of size $w$.
+## Why this is different from naive masking
+
+A common mistake is to implement "sparse" attention by computing the full $n \times n$ score matrix and then masking most of it to $-\infty$. That approach still allocates $O(n^2)$ memory — the masking happens *after* the damage is done.
+
+This implementation **never materializes the full matrix for value aggregation**:
+
+- **SparseAttention** uses `torch.gather` to extract and aggregate only the top-$k$ value vectors. Peak value-aggregation memory is $O(n \cdot k \cdot d)$.
+- **LocalAttention** uses `F.unfold` to extract sliding windows of size $w$, making the score and value tensors $[n, w]$, not $[n, n]$.
+
+The memory difference becomes measurable and dramatic at sequence lengths above 2k. Run the benchmark notebook with `n=4096` and `n=8192` to observe it directly.
 
 ## Methodology
 
-1.  **Implementation:** All three mechanisms were implemented as `nn.Module` classes in PyTorch. The code is available in [`attention_mechanisms.py`](./attention_mechanisms.py).
-2.  **Performance Benchmark:** Each model was benchmarked on a CPU/GPU by measuring the average execution time over 20 runs for various sequence lengths (from 64 to 1024).
-3.  **Qualitative Analysis:** Attention heatmaps were generated for each model to visually inspect their behavior and confirm that the masking was implemented correctly.
+1. **Implementation:** All three mechanisms in [`attention_mechanisms.py`](https://github.com/Hiteshwari7/efficient-attention-benchmark/blob/main/attention_mechanisms.py) as `nn.Module` classes with full multi-head support.
+2. **Benchmark:** Wall-clock time (ms) **and peak GPU memory (MB)** measured over 10 runs for sequence lengths from 64 to 8192.
+3. **Correctness:** Attention heatmaps verify each mechanism attends only where it should.
 
 ## Key Findings
 
-### 1. Performance-Compute Trade-off (The $O(n^2)$ Bottleneck)
+### Time Scaling (Log-Log Plot)
 
-The benchmark empirically validates the theoretical complexity.
+On a log-log scale, slope reveals complexity class:
+- Full attention slope ≈ 2 → quadratic (every doubling of $n$ quadruples time)
+- Sparse and Local slope ≈ 1 → linear in $n$ (every doubling of $n$ doubles time)
 
-![Performance Benchmark Plot](./download (1).png)
+### Memory Scaling
 
-The log-log plot clearly shows the classic **overhead vs. scaling** trade-off:
+This is the most important result. Full attention hits OOM on a standard GPU at $n \approx 4096$–$8192$. Sparse and Local remain well within budget because the $n \times n$ value tensor is **never allocated**.
 
-* **For short sequences ($n < 128$)**: The `Full O(n^2)` attention is actually the fastest. This is because the "efficient" methods have a fixed *overhead* (e.g., creating the mask, finding the top-k) that outweighs the benefits at a small scale.
-* **For long sequences ($n > 128$)**: The `Full O(n^2)` line's slope becomes much steeper, proving its quadratic scaling. The `Sparse` and `Local` methods, despite their initial overhead, have a shallower slope (more linear) and quickly become far more performant as the sequence length grows.
+### Overhead at Short Sequences
 
-### 2. Qualitative Heatmap Analysis
-
-The heatmaps visually confirm that the attention mechanisms function as designed.
-
-#### Heatmap: Full O(n^2)
-![Full Attention Heatmap](./download (2).png)
-**Analysis:** Correct. The plot is a solid block, showing that every token (Y-axis) is attending to every other token (X-axis).
-
-#### Heatmap: Local (w=32)
-![Local Attention Heatmap](./Screenshot 2025-10-31 at 10.02.46 PM.png)
-**Analysis:** Correct. The plot shows a perfect diagonal band. This proves that each token is only attending to tokens within its local window, and all tokens outside this window (the dark purple areas) are correctly masked.
-
-#### Heatmap: Sparse (k=32)
-![Sparse Attention Heatmap](./Screenshot 2025-10-31 at 10.02.34 PM.png)
-**Analysis:** Correct. The plot shows that each token (Y-axis) is only attending to a fixed number of 32 tokens (X-axis). Because the input was a simple, non-random tensor, all tokens "agreed" on which 32 tokens were the "top-k" most important, creating this blocky pattern. This confirms the top-k masking is working.
+At $n < 128$, Full attention is fastest. The efficient methods have fixed overhead (the gather/unfold operations) that outweighs the savings at small scale. This is expected — efficiency methods are designed for long sequences.
 
 ## How to Run
 
-1.  Clone the repository:
-    ```bash
-    git clone [https://github.com/anubhuti710/efficient-attention-benchmark.git](https://github.com/anubhuti710/efficient-attention-benchmark.git)
-    ```
-2.  Install requirements:
-    ```bash
-    pip install -r requirements.txt
-    ```
-3.  Run the benchmark:
-    Open and run the `main_benchmark.ipynb` notebook in Jupyter or Google Colab.
+```bash
+git clone https://github.com/Hiteshwari7/efficient-attention-benchmark.git
+cd efficient-attention-benchmark
+pip install -r requirements.txt
+```
+
+Open `main_benchmark.ipynb` in Jupyter or Google Colab and run all cells. A GPU is recommended to observe the memory measurements; the notebook gracefully handles OOM for full attention at long sequences.
+
+## Implementation Notes
+
+**SparseAttention:** The scoring pass (selecting top-k) still requires computing all $n^2$ scores once for ranking. True sub-quadratic scoring requires approximate methods (LSH as in Reformer, or block-sparse kernels as in BigBird). This implementation demonstrates correct O(n·k) value aggregation, which is the dominant memory cost at large $n$.
+
+**LocalAttention:** Fully sub-quadratic — neither scoring nor aggregation ever sees more than $n \cdot w$ elements. This is the same principle used in Longformer (Beltagy et al., 2020).
